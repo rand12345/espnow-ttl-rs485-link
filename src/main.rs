@@ -1,5 +1,3 @@
-// use embedded_hal::digital::v2::InputPin; //, OutputPin, ToggleableOutputPin};
-
 use embedded_svc::wifi::{AccessPointConfiguration, Configuration, Wifi};
 use esp_idf_hal::{prelude::*, serial};
 use esp_idf_svc::{
@@ -14,11 +12,11 @@ use futures_micro::yield_once as yield_now;
 use log::*;
 
 use std::{
-    // fmt::Debug,
     sync::Arc,
     time::{Duration, Instant},
 };
 
+// Async sleep helper func
 async fn sleep(dur: Duration) -> usize {
     let when = Instant::now() + dur;
     let mut count = 0;
@@ -32,6 +30,8 @@ async fn sleep(dur: Duration) -> usize {
     }
 }
 
+// UART Rx routine
+// Small buffer for stack, outputs smaller non-padded heap Vec of actual payload size
 async fn wait_uart_rx(rx: &mut serial::Rx<serial::UART1>) -> anyhow::Result<Vec<u8>> {
     loop {
         let mut buf = [0u8; 256];
@@ -47,37 +47,28 @@ async fn wait_uart_rx(rx: &mut serial::Rx<serial::UART1>) -> anyhow::Result<Vec<
     }
 }
 
-// async fn send_uart_tx(// tx: &mut serial::Tx<serial::UART1>,
-//     // vecbuf: &mut Vec<u8>,
-// ) -> anyhow::Result<()> {
-//     Ok(())
-// loop {
-// let mut buf = [0u8; 256];
-// if let Ok(len) = rx.read_bytes_blocking(&mut buf, Duration::from_micros(1000)) {
-//     vecbuf.clear();
-//     vecbuf.extend(buf.iter().take(len));
-// } else {
-//     sleep(Duration::from_millis(1)).await;
-// }
-// }
-// }
-
 fn main() {
     esp_idf_sys::link_patches();
+    // MAC address of each device
     let _rs485: [u8; 6] = [104, 103, 37, 130, 63, 229];
     let _ttl: [u8; 6] = [104, 103, 37, 130, 176, 157];
 
+    // switch these around for each device
     let remote = _ttl;
-    let local = _rs485;
-
+    let _local = _rs485;
     let ssid = "RS485link RS485";
+    // let ssid = "RS485link TTL"; // uncomment for TTL node
+
+    // UART baudrate
+    let uart_baud = Hertz(9600);
 
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
     let hal = esp_idf_hal::peripherals::Peripherals::take().unwrap();
 
-    let config = serial::config::Config::default().baudrate(Hertz(9600));
+    // UART HAL setup
+    let config = serial::config::Config::default().baudrate(uart_baud);
     let _userial: serial::Serial<serial::UART1, _, _> = serial::Serial::new(
         hal.uart1,
         serial::Pins {
@@ -90,12 +81,10 @@ fn main() {
     )
     .unwrap();
 
+    // Seperate UART channels
     let (mut tx, mut rx) = _userial.split();
 
-    // let mut input_button = hal.pins.gpio3.into_input().unwrap();
-    // let mut pin1 = hal.pins.gpio4.into_output().unwrap();
-    // let mut rx_led_pin = hal.pins.gpio7.into_output().unwrap();
-
+    // WiFi hardware configuration
     let netif_stack = Arc::new(EspNetifStack::new().unwrap());
     let sys_loop_stack = Arc::new(EspSysLoopStack::new().unwrap());
     let default_nvs = Arc::new(EspDefaultNvs::new().unwrap());
@@ -107,12 +96,11 @@ fn main() {
     }))
     .unwrap();
 
-    // let (tx_now, rx_now) = async_channel::bounded::<()>(10);
-    // let (tx_led, rx_led) = async_channel::bounded::<()>(10);
-
+    // ESP Now configuration
     let espnow_a = Arc::new(EspNowClient::new().unwrap());
 
     {
+        // Add remote device by MAC address
         let espnow = espnow_a.clone();
         espnow
             .add_peer(PeerInfo {
@@ -122,6 +110,7 @@ fn main() {
             })
             .unwrap();
 
+        // Send ESP Now Rx bytes to UART Tx as callback func
         espnow
             .register_recv_cb(move |_addr, _dat| {
                 tx.write_bytes(_dat).unwrap();
@@ -129,12 +118,13 @@ fn main() {
             })
             .unwrap();
 
+        // Debug on boot
         println!("Number of Peer: {:?}", espnow.get_peers_number());
         println!("Get Peers: {:?}", espnow.get_peer(remote));
         println!("Remote Peer: {:?}", espnow.peer_exists(remote));
     }
 
-    // Sending byte task
+    // Send UART Rx bytes to ESP Now Tx
     let espnow = espnow_a;
     let uart_rx_to_espnow_tx = async move {
         loop {
@@ -146,22 +136,15 @@ fn main() {
         }
     };
 
+    // Background busy loop
     let sleep_task = async {
         loop {
             std::thread::sleep(Duration::from_millis(1));
             yield_now().await
         }
     };
+
+    // Wait for wifi to init before launching async futures
     std::thread::sleep(Duration::from_secs(1));
-    spin_on::spin_on(futures_micro::zip!(
-        // print_task,
-        sleep_task,
-        uart_rx_to_espnow_tx,
-        // task2,
-        // task3
-    ));
+    spin_on::spin_on(futures_micro::zip!(sleep_task, uart_rx_to_espnow_tx,));
 }
-
-// register_recv_cb: addr [104, 103, 37, 130, 176, 157] dat [123]
-
-// register_recv_cb: addr [104, 103, 37, 130, 63, 229] dat [123]
